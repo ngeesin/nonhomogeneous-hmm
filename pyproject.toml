@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nhmm"
+version = "0.1.0"
+description = "Non-homogeneous hidden Markov models with covariate-driven transitions"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "nhmm contributors" }]
+keywords = [
+    "hidden-markov-model",
+    "hmm",
+    "non-homogeneous",
+    "time-series",
+    "machine-learning",
+    "covariates",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/ngeesin/nonhomogeneous-hmm"
+Repository = "https://github.com/ngeesin/nonhomogeneous-hmm"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nhmm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
