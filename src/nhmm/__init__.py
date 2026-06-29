@@ -20,11 +20,12 @@ from .emissions import (
     CategoricalEmissions,
     GaussianEmissions,
 )
-from .model import ConvergenceMonitor, NonHomogeneousHMM
+from .model import ConvergenceMonitor, ForwardSimulation, NonHomogeneousHMM
 from .transitions import SoftmaxTransitions
 
 __all__ = [
     "NonHomogeneousHMM",
+    "ForwardSimulation",
     "ConvergenceMonitor",
     "SoftmaxTransitions",
     "BaseEmissions",

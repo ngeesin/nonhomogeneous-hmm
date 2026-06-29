@@ -88,6 +88,33 @@ model = NonHomogeneousHMM(
 Y, states = model.sample(500, X)     # generate observations along covariates X
 ```
 
+### Forward simulation / forecasting
+
+`simulate_forward` draws Monte-Carlo future paths *conditioned on observed
+history*. It computes the filtered distribution of the current regime from
+`(Y, X)`, then rolls the chain forward over a horizon you define with a
+**future covariate path** `X_future`.
+
+> Because covariates are **exogenous**, the model cannot generate `X` for you —
+> you must supply `X_future` (e.g. a macro scenario). Its columns, order and
+> scaling must match the `X` used in `fit` (apply the same standardisation).
+
+```python
+horizon = 12
+X_future = np.linspace(-1, 2, horizon)[:, None]   # a covariate scenario
+
+sim = model.simulate_forward(Y, X, X_future, n_paths=5000, random_state=0)
+
+sim.y_paths        # (n_paths, horizon[, n_dim]) raw simulated observations
+sim.state_paths    # (n_paths, horizon)          simulated regimes
+sim.mean           # (horizon[, n_dim])          predictive mean
+sim.quantiles      # (n_levels, horizon[, n_dim]) predictive bands
+sim.state_probs    # (horizon, n_states)         per-step regime probabilities
+```
+
+See [`examples/forecast_paths.py`](examples/forecast_paths.py) for a runnable
+end-to-end forecast.
+
 ## API overview
 
 | Method | Description |
@@ -97,7 +124,8 @@ Y, states = model.sample(500, X)     # generate observations along covariates X
 | `predict_proba(Y, X=None, lengths=None)` | Smoothed state posteriors. |
 | `decode(Y, X=None, lengths=None)` | `(log_prob, states)` via Viterbi. |
 | `score(Y, X=None, lengths=None)` | Total log-likelihood. |
-| `sample(n_samples, X=None)` | Generate `(Y, states)`. |
+| `sample(n_samples, X=None)` | Generate `(Y, states)` unconditionally. |
+| `simulate_forward(Y, X, X_future, n_paths=...)` | Monte-Carlo forecast conditioned on history; returns a `ForwardSimulation`. |
 
 Key attributes after fitting: `startprob_`, `transitions_`
 (`SoftmaxTransitions`) and `emissions_`.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from . import _core
@@ -12,6 +14,34 @@ from .emissions import (
     GaussianEmissions,
 )
 from .transitions import SoftmaxTransitions
+
+
+@dataclass
+class ForwardSimulation:
+    """Result of :meth:`NonHomogeneousHMM.simulate_forward`.
+
+    Attributes
+    ----------
+    y_paths : ndarray of shape (n_paths, horizon) or (n_paths, horizon, n_dim)
+        Simulated future observations, one row per Monte-Carlo path.
+    state_paths : ndarray of shape (n_paths, horizon)
+        Simulated hidden-state paths.
+    mean : ndarray of shape (horizon,) or (horizon, n_dim)
+        Predictive mean of the observations across paths.
+    quantiles : ndarray of shape (n_levels, horizon[, n_dim])
+        Predictive quantile bands of the observations across paths.
+    quantile_levels : tuple of float
+        The probability levels matching the first axis of ``quantiles``.
+    state_probs : ndarray of shape (horizon, n_states)
+        Per-step probability of occupying each hidden state.
+    """
+
+    y_paths: np.ndarray
+    state_paths: np.ndarray
+    mean: np.ndarray
+    quantiles: np.ndarray
+    quantile_levels: tuple
+    state_probs: np.ndarray
 
 
 class ConvergenceMonitor:
@@ -323,3 +353,103 @@ class NonHomogeneousHMM:
         observations = [self.emissions_.sample(int(s), rng) for s in states]
         Y = np.asarray(observations)
         return Y, states
+
+    def simulate_forward(
+        self,
+        Y,
+        X,
+        X_future,
+        n_paths=1000,
+        quantiles=(0.05, 0.5, 0.95),
+        random_state=None,
+    ):
+        """Monte-Carlo forecast of future observation paths given history.
+
+        Conditions on the observed history ``(Y, X)`` to obtain the filtered
+        distribution of the current hidden state, then rolls the chain forward
+        over the horizon defined by ``X_future``, drawing ``n_paths``
+        independent state-and-observation paths.
+
+        Because the model treats covariates as *exogenous*, the future
+        covariates ``X_future`` must be supplied explicitly -- the model cannot
+        generate them. They must use the **same columns, order and scaling** as
+        the ``X`` passed to :meth:`fit` (e.g. apply the same standardisation).
+
+        Parameters
+        ----------
+        Y : array-like
+            Observed history (a single sequence), shape ``(T,)`` or ``(T, n_dim)``.
+        X : array-like of shape (T, n_covariates) or None
+            Covariates aligned with ``Y``. ``None`` for an intercept-only model.
+        X_future : array-like of shape (horizon, n_covariates)
+            Covariates for each future step. ``X_future[k]`` drives the
+            transition into future step ``k`` (matching the training
+            convention). ``horizon`` is inferred from its length. Pass an array
+            of shape ``(horizon, 0)`` (or ``None`` is *not* accepted here) only
+            for intercept-only models; otherwise provide the covariate columns.
+        n_paths : int, default=1000
+            Number of Monte-Carlo paths to draw.
+        quantiles : sequence of float, default=(0.05, 0.5, 0.95)
+            Probability levels for the predictive bands.
+        random_state : int, Generator or None
+
+        Returns
+        -------
+        ForwardSimulation
+        """
+        rng = check_random_state(
+            random_state if random_state is not None else self.random_state
+        )
+        Y = np.asarray(Y)
+        n_hist = Y.shape[0]
+
+        # 1. Filtered distribution of the final observed state P(z_T | history).
+        Xd = self._design_matrix(X, n_hist)
+        frameprob = self.emissions_.log_likelihood(Y)
+        log_start = np.log(self.startprob_)
+        if n_hist > 1:
+            log_trans = self.transitions_.log_transition_matrices(Xd)[1:]
+        else:
+            log_trans = np.empty((0, self.n_states, self.n_states))
+        log_alpha, _ = _core.forward(log_start, log_trans, frameprob)
+        filt = np.exp(log_normalize(log_alpha[-1]))
+
+        # 2. Future transition matrices; X_future[k] drives the move into step k.
+        X_future = np.atleast_2d(np.asarray(X_future, dtype=float))
+        horizon = X_future.shape[0]
+        if horizon < 1:
+            raise ValueError("X_future must contain at least one future step")
+        Xdf = self._design_matrix(X_future, horizon)
+        A_future = self.transitions_.transition_matrices(Xdf)  # (horizon, K, K)
+
+        # 3. Monte-Carlo roll-out, vectorised across paths.
+        state_paths = np.empty((n_paths, horizon), dtype=int)
+        z_prev = rng.choice(self.n_states, size=n_paths, p=filt)
+        per_step_obs = []
+        for k in range(horizon):
+            probs = A_future[k, z_prev]  # (n_paths, K)
+            u = rng.random(n_paths)[:, None]
+            z = (np.cumsum(probs, axis=1) > u).argmax(axis=1)
+            state_paths[:, k] = z
+            per_step_obs.append(
+                np.asarray([self.emissions_.sample(int(s), rng) for s in z])
+            )
+            z_prev = z
+        y_paths = np.stack(per_step_obs, axis=1)
+
+        # 4. Summaries.
+        levels = tuple(quantiles)
+        mean = y_paths.mean(axis=0)
+        quantile_bands = np.quantile(y_paths, levels, axis=0)
+        state_probs = np.empty((horizon, self.n_states))
+        for j in range(self.n_states):
+            state_probs[:, j] = (state_paths == j).mean(axis=0)
+
+        return ForwardSimulation(
+            y_paths=y_paths,
+            state_paths=state_paths,
+            mean=mean,
+            quantiles=quantile_bands,
+            quantile_levels=levels,
+            state_probs=state_probs,
+        )
