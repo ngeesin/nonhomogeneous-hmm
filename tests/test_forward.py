@@ -307,3 +307,70 @@ def test_intercept_only_forward():
     )
     assert sim.y_paths.shape == (50, 5, 1)
     assert np.isfinite(sim.mean).all()
+
+
+def _sticky_plain_model():
+    """Sticky intercept-only (plain HMM) model: each state prefers to stay."""
+    model = NonHomogeneousHMM(2)
+    model.startprob_ = np.array([0.5, 0.5])
+    em = GaussianEmissions(2, 1)
+    em.means_ = np.array([[-4.0], [4.0]])
+    em.covars_ = np.array([[0.25], [0.25]])
+    model.emissions_ = em
+    tr = SoftmaxTransitions(2, 1)  # intercept only -> n_cov == 0
+    tr.weights = np.array([[[2.0, -2.0]], [[-2.0, 2.0]]])
+    model.transitions_ = tr
+    return model
+
+
+def test_plain_hmm_forward_only_Y():
+    rng = np.random.default_rng(5)
+    Y = np.vstack([rng.normal(0, 1, (100, 1)), rng.normal(6, 1, (100, 1))])
+    model = NonHomogeneousHMM(2, random_state=0, n_iter=30).fit(Y)  # plain HMM
+
+    sim = model.simulate_forward(Y, horizon=8, n_paths=200, random_state=0)
+    assert sim.y_paths.shape == (200, 8, 1)
+    assert sim.state_paths.shape == (200, 8)
+    assert sim.mean.shape == (8, 1)
+    assert sim.quantiles.shape == (3, 8, 1)
+    assert sim.state_probs.shape == (8, 2)
+    assert np.allclose(sim.state_probs.sum(axis=1), 1.0)
+    assert sim.covariate_paths is None
+    assert np.isfinite(sim.mean).all()
+
+
+def test_plain_hmm_filtered_start_carries():
+    model = _sticky_plain_model()
+    # History ending clearly in the high regime (state 1) vs the low one.
+    sim_hi = model.simulate_forward(
+        np.full((10, 1), 4.0), horizon=3, n_paths=2000, random_state=0
+    )
+    sim_lo = model.simulate_forward(
+        np.full((10, 1), -4.0), horizon=3, n_paths=2000, random_state=0
+    )
+    assert sim_hi.state_probs[0, 1] > 0.9
+    assert sim_lo.state_probs[0, 0] > 0.9
+
+
+def test_plain_hmm_determinism():
+    rng = np.random.default_rng(6)
+    Y = np.vstack([rng.normal(0, 1, (80, 1)), rng.normal(6, 1, (80, 1))])
+    model = NonHomogeneousHMM(2, random_state=0, n_iter=30).fit(Y)
+    a = model.simulate_forward(Y, horizon=10, n_paths=50, random_state=3)
+    b = model.simulate_forward(Y, horizon=10, n_paths=50, random_state=3)
+    assert np.array_equal(a.state_paths, b.state_paths)
+    assert np.allclose(a.y_paths, b.y_paths)
+
+
+def test_plain_hmm_requires_horizon():
+    model = _sticky_plain_model()
+    with pytest.raises(ValueError):
+        model.simulate_forward(np.full((5, 1), 4.0))  # no horizon, no covariates
+
+
+def test_covariate_model_still_requires_x_future():
+    # A model WITH a covariate must still be given X_future in exogenous mode.
+    model = _build_model(2, _FORCED_EXIT_WEIGHTS)  # n_cov == 1
+    Y, X = _history_in_state0()
+    with pytest.raises(ValueError):
+        model.simulate_forward(Y, X, X_future=None, horizon=5)

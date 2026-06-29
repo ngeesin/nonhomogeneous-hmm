@@ -410,7 +410,7 @@ class NonHomogeneousHMM:
     def simulate_forward(
         self,
         Y,
-        X,
+        X=None,
         X_future=None,
         n_paths=1000,
         quantiles=(0.05, 0.5, 0.95),
@@ -448,12 +448,14 @@ class NonHomogeneousHMM:
         X : array-like of shape (T, n_covariates) or None
             Covariates aligned with ``Y``. In duration mode this must already
             contain the duration column (see :func:`nhmm.state_durations`).
-            ``None`` only for an intercept-only model.
+            ``None`` for an intercept-only model (a plain HMM).
         X_future : array-like of shape (horizon, n_covariates), optional
             Future covariates. ``X_future[k]`` drives the transition into future
             step ``k``. In duration mode the values in column ``duration_col``
             are ignored (overwritten online); omit ``X_future`` entirely when
-            duration is the only covariate. ``horizon`` is inferred from its
+            duration is the only covariate. For an intercept-only model (a plain
+            HMM) omit it too and pass ``horizon`` -- the constant transition
+            matrix is used at every step. ``horizon`` is inferred from its
             length when given.
         n_paths : int, default=1000
             Number of Monte-Carlo paths to draw.
@@ -524,12 +526,20 @@ class NonHomogeneousHMM:
             covariate_paths = np.empty((n_paths, horizon))
         else:
             if X_future is None:
-                raise ValueError("X_future is required when duration_col is None")
-            X_future = np.atleast_2d(np.asarray(X_future, dtype=float))
-            horizon = X_future.shape[0]
-            A_future = self.transitions_.transition_matrices(
-                self._design_matrix(X_future, horizon)
-            )
+                if n_cov != 0:
+                    raise ValueError(
+                        "X_future is required when the model has exogenous covariates"
+                    )
+                if horizon is None:
+                    raise ValueError(
+                        "horizon is required when simulating without covariates"
+                    )
+                design = self._design_matrix(None, horizon)  # intercept-only
+            else:
+                X_future = np.atleast_2d(np.asarray(X_future, dtype=float))
+                horizon = X_future.shape[0]
+                design = self._design_matrix(X_future, horizon)
+            A_future = self.transitions_.transition_matrices(design)
             covariate_paths = None
         if horizon < 1:
             raise ValueError("forecast horizon must be at least one step")

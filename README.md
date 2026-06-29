@@ -116,6 +116,14 @@ sim.quantiles      # (n_levels, horizon[, n_dim]) predictive bands
 sim.state_probs    # (horizon, n_states)         per-step regime probabilities
 ```
 
+For a **plain HMM** (intercept-only model fit with no covariates), omit both
+`X` and `X_future` and just give a horizon:
+
+```python
+model = NonHomogeneousHMM(n_states=2).fit(Y)      # no covariates
+sim = model.simulate_forward(Y, horizon=12)        # forecast from history Y alone
+```
+
 See [`examples/forecast_paths.py`](examples/forecast_paths.py) for a runnable
 end-to-end forecast.
 
