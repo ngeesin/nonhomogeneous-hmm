@@ -34,6 +34,10 @@ class ForwardSimulation:
         The probability levels matching the first axis of ``quantiles``.
     state_probs : ndarray of shape (horizon, n_states)
         Per-step probability of occupying each hidden state.
+    covariate_paths : ndarray of shape (n_paths, horizon) or None
+        In dynamic duration mode, the sojourn-duration value fed to the model
+        at each step of each path (the online ``X_future``). ``None`` when a
+        fixed exogenous ``X_future`` was used.
     """
 
     y_paths: np.ndarray
@@ -42,6 +46,7 @@ class ForwardSimulation:
     quantiles: np.ndarray
     quantile_levels: tuple
     state_probs: np.ndarray
+    covariate_paths: np.ndarray | None = None
 
 
 class ConvergenceMonitor:
@@ -358,40 +363,64 @@ class NonHomogeneousHMM:
         self,
         Y,
         X,
-        X_future,
+        X_future=None,
         n_paths=1000,
         quantiles=(0.05, 0.5, 0.95),
         random_state=None,
+        *,
+        duration_col=None,
+        initial_duration=1,
+        horizon=None,
     ):
         """Monte-Carlo forecast of future observation paths given history.
 
         Conditions on the observed history ``(Y, X)`` to obtain the filtered
-        distribution of the current hidden state, then rolls the chain forward
-        over the horizon defined by ``X_future``, drawing ``n_paths``
-        independent state-and-observation paths.
+        distribution of the current hidden state, then rolls the chain forward,
+        drawing ``n_paths`` independent state-and-observation paths.
 
-        Because the model treats covariates as *exogenous*, the future
-        covariates ``X_future`` must be supplied explicitly -- the model cannot
-        generate them. They must use the **same columns, order and scaling** as
-        the ``X`` passed to :meth:`fit` (e.g. apply the same standardisation).
+        Two covariate modes are supported:
+
+        * **Exogenous** (default, ``duration_col=None``): the future covariates
+          ``X_future`` are supplied explicitly -- the model cannot generate
+          them. They must use the **same columns, order and scaling** as the
+          ``X`` passed to :meth:`fit`.
+        * **Dynamic sojourn-duration** (``duration_col`` set): one covariate
+          column is the *duration* (number of consecutive steps spent in the
+          current state). Because that is endogenous -- future durations depend
+          on the simulated state path -- it is computed **online** at each step
+          and written into column ``duration_col``. Any *other* (genuinely
+          exogenous) covariates are still supplied via ``X_future``; if duration
+          is the only covariate, omit ``X_future`` and pass ``horizon`` instead.
+          The duration is fed as a raw integer count.
 
         Parameters
         ----------
         Y : array-like
             Observed history (a single sequence), shape ``(T,)`` or ``(T, n_dim)``.
         X : array-like of shape (T, n_covariates) or None
-            Covariates aligned with ``Y``. ``None`` for an intercept-only model.
-        X_future : array-like of shape (horizon, n_covariates)
-            Covariates for each future step. ``X_future[k]`` drives the
-            transition into future step ``k`` (matching the training
-            convention). ``horizon`` is inferred from its length. Pass an array
-            of shape ``(horizon, 0)`` (or ``None`` is *not* accepted here) only
-            for intercept-only models; otherwise provide the covariate columns.
+            Covariates aligned with ``Y``. In duration mode this must already
+            contain the duration column (see :func:`nhmm.state_durations`).
+            ``None`` only for an intercept-only model.
+        X_future : array-like of shape (horizon, n_covariates), optional
+            Future covariates. ``X_future[k]`` drives the transition into future
+            step ``k``. In duration mode the values in column ``duration_col``
+            are ignored (overwritten online); omit ``X_future`` entirely when
+            duration is the only covariate. ``horizon`` is inferred from its
+            length when given.
         n_paths : int, default=1000
             Number of Monte-Carlo paths to draw.
         quantiles : sequence of float, default=(0.05, 0.5, 0.95)
             Probability levels for the predictive bands.
         random_state : int, Generator or None
+        duration_col : int, optional
+            Index (within the raw covariate columns, before the intercept) of
+            the sojourn-duration covariate. Enables dynamic mode.
+        initial_duration : int or array-like of shape (n_paths,), default=1
+            Run-length of the current state at the start of the forecast,
+            applied per path. Typically ``state_durations(history_states)[-1]``.
+        horizon : int, optional
+            Forecast length. Required in duration mode when ``X_future`` is not
+            given; otherwise inferred from ``X_future``.
 
         Returns
         -------
@@ -414,26 +443,73 @@ class NonHomogeneousHMM:
         log_alpha, _ = _core.forward(log_start, log_trans, frameprob)
         filt = np.exp(log_normalize(log_alpha[-1]))
 
-        # 2. Future transition matrices; X_future[k] drives the move into step k.
-        X_future = np.atleast_2d(np.asarray(X_future, dtype=float))
-        horizon = X_future.shape[0]
+        dynamic = duration_col is not None
+        n_cov = self.transitions_.n_features - (1 if self.fit_intercept else 0)
+
+        # 2. Resolve the horizon and pre-compute transitions where possible.
+        if dynamic:
+            if not 0 <= duration_col < n_cov:
+                raise ValueError(
+                    f"duration_col must be in [0, {n_cov}), got {duration_col}"
+                )
+            if X_future is not None:
+                base = np.atleast_2d(np.asarray(X_future, dtype=float))
+                if base.shape[1] != n_cov:
+                    raise ValueError(
+                        f"X_future has {base.shape[1]} columns, expected {n_cov}"
+                    )
+                horizon = base.shape[0]
+            else:
+                if horizon is None:
+                    raise ValueError(
+                        "horizon is required in duration mode when X_future is None"
+                    )
+                if n_cov != 1:
+                    raise ValueError(
+                        "X_future is required: the model has exogenous covariates "
+                        "besides the duration column"
+                    )
+                base = np.zeros((horizon, n_cov))
+            durations = np.broadcast_to(
+                np.asarray(initial_duration, dtype=float), (n_paths,)
+            ).copy()
+            covariate_paths = np.empty((n_paths, horizon))
+        else:
+            if X_future is None:
+                raise ValueError("X_future is required when duration_col is None")
+            X_future = np.atleast_2d(np.asarray(X_future, dtype=float))
+            horizon = X_future.shape[0]
+            A_future = self.transitions_.transition_matrices(
+                self._design_matrix(X_future, horizon)
+            )
+            covariate_paths = None
         if horizon < 1:
-            raise ValueError("X_future must contain at least one future step")
-        Xdf = self._design_matrix(X_future, horizon)
-        A_future = self.transitions_.transition_matrices(Xdf)  # (horizon, K, K)
+            raise ValueError("forecast horizon must be at least one step")
 
         # 3. Monte-Carlo roll-out, vectorised across paths.
         state_paths = np.empty((n_paths, horizon), dtype=int)
         z_prev = rng.choice(self.n_states, size=n_paths, p=filt)
+        rows_idx = np.arange(n_paths)
         per_step_obs = []
         for k in range(horizon):
-            probs = A_future[k, z_prev]  # (n_paths, K)
+            if dynamic:
+                rows = np.tile(base[k], (n_paths, 1))
+                rows[:, duration_col] = durations
+                A = self.transitions_.transition_matrices(
+                    self._design_matrix(rows, n_paths)
+                )
+                probs = A[rows_idx, z_prev]  # (n_paths, K)
+            else:
+                probs = A_future[k, z_prev]  # (n_paths, K)
             u = rng.random(n_paths)[:, None]
             z = (np.cumsum(probs, axis=1) > u).argmax(axis=1)
             state_paths[:, k] = z
             per_step_obs.append(
                 np.asarray([self.emissions_.sample(int(s), rng) for s in z])
             )
+            if dynamic:
+                covariate_paths[:, k] = durations
+                durations = np.where(z == z_prev, durations + 1, 1)
             z_prev = z
         y_paths = np.stack(per_step_obs, axis=1)
 
@@ -452,4 +528,5 @@ class NonHomogeneousHMM:
             quantiles=quantile_bands,
             quantile_levels=levels,
             state_probs=state_probs,
+            covariate_paths=covariate_paths,
         )

@@ -54,6 +54,25 @@ def normalize(a: np.ndarray, axis: int | None = None) -> np.ndarray:
     return a / total
 
 
+def state_durations(states) -> np.ndarray:
+    """Running sojourn length of a hidden-state sequence.
+
+    Returns an integer array ``d`` where ``d[t]`` is the number of consecutive
+    steps (ending at ``t``) spent in the same state, counting from one. This is
+    the duration covariate used by duration-dependent transition models.
+
+    Example
+    -------
+    >>> state_durations([0, 0, 1, 1, 1, 0])
+    array([1, 2, 1, 2, 3, 1])
+    """
+    states = np.asarray(states).ravel()
+    d = np.ones(len(states), dtype=int)
+    for t in range(1, len(states)):
+        d[t] = d[t - 1] + 1 if states[t] == states[t - 1] else 1
+    return d
+
+
 def iter_sequences(n_total: int, lengths=None):
     """Yield ``(start, end)`` slices for each sequence.
 

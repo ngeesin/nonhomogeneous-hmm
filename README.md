@@ -115,6 +115,43 @@ sim.state_probs    # (horizon, n_states)         per-step regime probabilities
 See [`examples/forecast_paths.py`](examples/forecast_paths.py) for a runnable
 end-to-end forecast.
 
+#### Duration-dependent (endogenous) covariate
+
+Sometimes a covariate is the **sojourn duration** — how many consecutive steps
+the chain has spent in its current state (a duration-dependent / semi-Markov
+style model). That covariate is *endogenous*: future durations depend on the
+simulated state path, so it can't be supplied up front. `simulate_forward`
+computes it **online** when you point it at the duration column with
+`duration_col`:
+
+```python
+from nhmm import state_durations
+
+# Build the duration column for the history (and the starting run-length) from
+# the known/decoded history states — the same way you built it for fit():
+X_hist = state_durations(history_states)[:, None].astype(float)
+init_dur = int(state_durations(history_states)[-1])
+
+# Duration is the only covariate -> no X_future, just a horizon:
+sim = model.simulate_forward(
+    Y, X_hist, X_future=None, horizon=12,
+    duration_col=0, initial_duration=init_dur, n_paths=5000,
+)
+
+sim.covariate_paths   # (n_paths, horizon) the duration fed at each step
+```
+
+- `duration_col` is the index of the duration covariate among the raw columns.
+- If training **also** used other exogenous covariates, pass those via
+  `X_future` (full width); only the duration column is overwritten online.
+- The running duration is fed as a **raw count**, so fit the model on raw
+  counts too. Build the history/training duration column with
+  [`state_durations`](src/nhmm/_utils.py).
+
+> Note: at fit time the duration is treated as an ordinary (precomputed)
+> covariate; it only becomes endogenous during simulation. See
+> [`examples/forecast_duration.py`](examples/forecast_duration.py).
+
 ## API overview
 
 | Method | Description |
@@ -125,7 +162,10 @@ end-to-end forecast.
 | `decode(Y, X=None, lengths=None)` | `(log_prob, states)` via Viterbi. |
 | `score(Y, X=None, lengths=None)` | Total log-likelihood. |
 | `sample(n_samples, X=None)` | Generate `(Y, states)` unconditionally. |
-| `simulate_forward(Y, X, X_future, n_paths=...)` | Monte-Carlo forecast conditioned on history; returns a `ForwardSimulation`. |
+| `simulate_forward(Y, X, X_future=None, *, duration_col=None, ...)` | Monte-Carlo forecast conditioned on history (exogenous or online duration covariate); returns a `ForwardSimulation`. |
+
+Module-level helper: `state_durations(states)` — running sojourn length of a
+state sequence, for building duration covariates.
 
 Key attributes after fitting: `startprob_`, `transitions_`
 (`SoftmaxTransitions`) and `emissions_`.
