@@ -298,6 +298,54 @@ class NonHomogeneousHMM:
             out[start:end] = gamma
         return out
 
+    def mean_transition_matrix(self, Y, X=None, lengths=None):
+        """Occupancy-weighted historical mean transition matrix.
+
+        Because the transition matrix is time-varying in a non-homogeneous HMM,
+        this summarises it as the single matrix implied by the data:
+
+        .. math::
+
+            A[i, j] = \\frac{\\sum_t P(z_{t-1}=i, z_t=j \\mid \\text{data})}
+                           {\\sum_t P(z_{t-1}=i \\mid \\text{data})}
+
+        i.e. expected ``i -> j`` transition counts divided by expected time
+        spent in ``i``, from the fitted model's smoothed posteriors over the
+        supplied history. This is exactly the single transition matrix a
+        *homogeneous* HMM would estimate, and equals the row-normalised sum of
+        the per-step transition posteriors.
+
+        Parameters
+        ----------
+        Y : array-like
+            Observed history, as for :meth:`score`.
+        X : array-like of shape (n_obs, n_covariates), optional
+            Covariates aligned with ``Y``.
+        lengths : array-like of int, optional
+            Length of each sequence; must sum to ``len(Y)``.
+
+        Returns
+        -------
+        ndarray of shape (n_states, n_states)
+            Row-stochastic mean transition matrix. A state with zero expected
+            occupancy in the supplied history yields an all-zero row.
+        """
+        Y = np.asarray(Y)
+        Xd = self._design_matrix(X, Y.shape[0])
+        log_start = np.log(self.startprob_)
+        xi_total = np.zeros((self.n_states, self.n_states))
+        for start, end in iter_sequences(Y.shape[0], lengths):
+            frameprob = self.emissions_.log_likelihood(Y[start:end])
+            log_trans = self._per_sequence_logtrans(Xd, start, end)
+            log_alpha, ll = _core.forward(log_start, log_trans, frameprob)
+            log_beta = _core.backward(log_start, log_trans, frameprob)
+            _, xi_sum, _ = _core.posteriors(
+                log_alpha, log_beta, log_trans, frameprob, ll
+            )
+            if xi_sum is not None:  # None for single-observation sequences
+                xi_total += xi_sum
+        return normalize(xi_total, axis=1)
+
     def predict(self, Y, X=None, lengths=None):
         """Most likely hidden-state sequence (Viterbi decoding)."""
         Y = np.asarray(Y)

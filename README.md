@@ -62,6 +62,10 @@ ll = model.score(Y, X)               # total log-likelihood
 
 # Inspect how the transition matrix depends on the covariate:
 A = model.transitions_.transition_matrices(model._design_matrix([[2.0]], 1))
+
+# Single summary matrix over the whole history (occupancy-weighted average,
+# i.e. what a homogeneous HMM would estimate):
+A_mean = model.mean_transition_matrix(Y, X)
 ```
 
 ### Multiple sequences
@@ -161,6 +165,7 @@ sim.covariate_paths   # (n_paths, horizon) the duration fed at each step
 | `predict_proba(Y, X=None, lengths=None)` | Smoothed state posteriors. |
 | `decode(Y, X=None, lengths=None)` | `(log_prob, states)` via Viterbi. |
 | `score(Y, X=None, lengths=None)` | Total log-likelihood. |
+| `mean_transition_matrix(Y, X=None, lengths=None)` | Occupancy-weighted historical mean transition matrix (the single matrix a homogeneous HMM would estimate). |
 | `sample(n_samples, X=None)` | Generate `(Y, states)` unconditionally. |
 | `simulate_forward(Y, X, X_future=None, *, duration_col=None, ...)` | Monte-Carlo forecast conditioned on history (exogenous or online duration covariate); returns a `ForwardSimulation`. |
 

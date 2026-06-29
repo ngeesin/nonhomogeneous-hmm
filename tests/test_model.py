@@ -1,8 +1,19 @@
 import numpy as np
 import pytest
 
-from nhmm import GaussianEmissions, NonHomogeneousHMM
+from nhmm import GaussianEmissions, NonHomogeneousHMM, _core
 from nhmm.transitions import SoftmaxTransitions
+
+
+def _sample_homogeneous(rng, n, A_true, means=(-3.0, 3.0), sd=0.5):
+    """Generate a plain homogeneous 2-state HMM with a known matrix."""
+    A_true = np.asarray(A_true)
+    states = np.empty(n, dtype=int)
+    states[0] = 0
+    for t in range(1, n):
+        states[t] = rng.choice(2, p=A_true[states[t - 1]])
+    Y = rng.normal(np.asarray(means)[states], sd)
+    return Y[:, None], states
 
 
 def _sample_nhmm(rng, n, w_intercept, w_cov):
@@ -127,3 +138,61 @@ def test_custom_emission_instance():
     model = NonHomogeneousHMM(2, emissions=em, random_state=0, n_iter=20).fit(Y)
     assert model.emissions_ is em
     assert np.isfinite(model.score(Y))
+
+
+def test_mean_transition_matrix_rows_normalised():
+    rng = np.random.default_rng(0)
+    cov, Y, _ = _sample_nhmm(rng, 800, [[0.0, 0.0], [0.0, 0.0]], [[0.0, 2.0], [0.0, -2.0]])
+    model = NonHomogeneousHMM(2, random_state=0, n_iter=50).fit(Y, cov)
+    A = model.mean_transition_matrix(Y, cov)
+    assert A.shape == (2, 2)
+    assert np.allclose(A.sum(axis=1), 1.0)
+
+
+def test_mean_transition_matrix_homogeneous_consistency():
+    rng = np.random.default_rng(1)
+    A_true = np.array([[0.9, 0.1], [0.2, 0.8]])
+    Y, _ = _sample_homogeneous(rng, 6000, A_true)
+    model = NonHomogeneousHMM(2, random_state=0, n_iter=100).fit(Y)  # intercept only
+
+    A_est = model.mean_transition_matrix(Y)
+    # The model's own constant transition matrix (intercept-only design row).
+    A_model = model.transitions_.transition_matrices(model._design_matrix(None, 1))[0]
+
+    # Align label permutation by sorting on the fitted emission means.
+    order = np.argsort(model.emissions_.means_.ravel())
+    A_est = A_est[np.ix_(order, order)]
+    A_model = A_model[np.ix_(order, order)]
+
+    assert np.allclose(A_est, A_true, atol=0.05)
+    assert np.allclose(A_est, A_model, atol=0.05)
+
+
+def test_mean_transition_matrix_matches_normalized_xi():
+    rng = np.random.default_rng(2)
+    cov, Y, _ = _sample_nhmm(rng, 400, [[0.0, 0.0], [0.0, 0.0]], [[0.0, 2.0], [0.0, -2.0]])
+    model = NonHomogeneousHMM(2, random_state=0, n_iter=40).fit(Y, cov)
+
+    # Direct forward-backward on the same data -> normalised summed xi.
+    Xd = model._design_matrix(cov, len(Y))
+    log_trans = model.transitions_.log_transition_matrices(Xd)[1:]
+    frameprob = model.emissions_.log_likelihood(Y)
+    log_start = np.log(model.startprob_)
+    la, ll = _core.forward(log_start, log_trans, frameprob)
+    lb = _core.backward(log_start, log_trans, frameprob)
+    _, xi_sum, _ = _core.posteriors(la, lb, log_trans, frameprob, ll)
+    expected = xi_sum / xi_sum.sum(axis=1, keepdims=True)
+
+    assert np.allclose(model.mean_transition_matrix(Y, cov), expected)
+
+
+def test_mean_transition_matrix_multiple_sequences():
+    rng = np.random.default_rng(3)
+    Y = np.vstack([rng.normal(0, 1, (60, 1)), rng.normal(5, 1, (60, 1)),
+                   rng.normal(0, 1, (40, 1))])
+    X = rng.standard_normal((160, 1))
+    lengths = [60, 60, 40]
+    model = NonHomogeneousHMM(2, random_state=0, n_iter=20).fit(Y, X, lengths=lengths)
+    A = model.mean_transition_matrix(Y, X, lengths=lengths)
+    assert A.shape == (2, 2)
+    assert np.allclose(A.sum(axis=1), 1.0)
